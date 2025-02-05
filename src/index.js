@@ -1,4 +1,4 @@
-import { animate, spring, inView, scroll, stagger } from "motion";
+import { animate, spring, inView, scroll, stagger, mix } from "motion";
 
 const functionRegistry = {
   spring: (...args) => spring(...args),
@@ -44,6 +44,10 @@ export default function (Alpine) {
 
   Alpine.magic("animate", () => (name, options) => {
     return animate(name, options);
+  });
+
+  Alpine.magic("mix", () => (options) => {
+    return mix(options);
   });
 
   Alpine.magic("scroll", () => (callback, options) => {
