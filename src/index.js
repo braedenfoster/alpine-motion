@@ -1,7 +1,16 @@
-import { animate, spring, inView, scroll, stagger, mix } from "motion";
+import { animate, spring, inView, scroll, stagger, mix, hover, press } from "motion";
 
 const functionRegistry = {
-  spring: (...args) => spring(...args),
+  spring: (...args) => {
+    // If no args or args[0] is an object (options), ensure it has keyframes
+    if (args.length === 0) {
+      return spring({ keyframes: [0, 1] });
+    }
+    if (typeof args[0] === 'object' && !args[0].keyframes) {
+      args[0] = { ...args[0], keyframes: [0, 1] };
+    }
+    return spring(...args);
+  },
   stagger: (...args) => stagger(...args),
 };
 
@@ -42,28 +51,59 @@ export default function (Alpine) {
     return animate(animationData.el, ...animationData.options);
   });
 
-  Alpine.magic("animate", () => (name, options) => {
-    return animate(name, options);
+  Alpine.magic("animate", () => (subject, keyframes, options) => {
+    return animate(subject, keyframes, options);
   });
 
   Alpine.magic("mix", () => (options) => {
     return mix(options);
   });
 
-  Alpine.magic("scroll", () => (callback, options) => {
-    return scroll(callback, options);
+  Alpine.magic("scroll", () => (name, options = {}) => {
+    if (!Alpine.store("motion")) {
+      console.warn("No motion elements found");
+      return;
+    }
+
+    const animationData = Alpine.store("motion").elements[name];
+
+    if (!animationData) {
+      console.warn(`x-motion:${name} not found`);
+      return;
+    }
+
+    const animation = animate(animationData.el, ...animationData.options);
+    return scroll(animation, options);
   });
 
   Alpine.magic("stagger", () => (callback, options) => {
     return stagger(callback, options);
   });
 
-  Alpine.magic("inView", () => (callback, options) => {
-    return inView(callback, options);
+  Alpine.magic("inView", () => (elementOrSelector, callback, options) => {
+    queueMicrotask(() => {
+      return inView(elementOrSelector, callback, options);
+    });
   });
 
-  Alpine.magic("spring", () => (callback, options) => {
-    return spring(callback, options);
+  Alpine.magic("spring", () => (options = {}) => {
+    // Ensure keyframes are present for spring to work
+    if (!options.keyframes) {
+      options = { ...options, keyframes: [0, 1] };
+    }
+    return spring(options);
+  });
+
+  Alpine.magic("hover", (el) => (elementOrSelector, callback, options) => {
+    queueMicrotask(() => {
+      hover(elementOrSelector, callback, options);
+    });
+  });
+
+  Alpine.magic("press", (el) => (elementOrSelector, callback, options) => {
+    queueMicrotask(() => {
+      press(elementOrSelector, callback, options);
+    });
   });
 
   async function motion(
@@ -71,7 +111,7 @@ export default function (Alpine) {
     { expression, modifiers, value },
     { evaluateLater, evaluate, effect, cleanup }
   ) {
-    const specialModifiersIndex = ["in-view", "scroll"];
+    const specialModifiersIndex = ["in-view", "scroll", "hover", "press"];
     const specialModifiers = modifiers.filter((modifier) =>
       specialModifiersIndex.includes(modifier)
     );
@@ -104,7 +144,23 @@ export default function (Alpine) {
     if (animationData.nameless) {
       effect(() => {
         animationData.nameless((data) => {
-          const resolvedData = resolveFunctionCalls(data);
+          console.log(data)
+          // Check if this is an enter/leave structure before resolving
+          const firstItem = Array.isArray(data) ? data[0] : data;
+          const hasEnterLeave = firstItem && typeof firstItem === 'object' &&
+                                (firstItem.hasOwnProperty('enter') || firstItem.hasOwnProperty('leave'));
+
+          let resolvedData;
+          if (hasEnterLeave) {
+            // Preserve the enter/leave structure and resolve each separately
+            resolvedData = [{
+              enter: resolveFunctionCalls(firstItem.enter || []),
+              leave: resolveFunctionCalls(firstItem.leave || [])
+            }];
+          } else {
+            resolvedData = resolveFunctionCalls(data);
+          }
+
           const animationHandled = handleSpecialModifiers(
             el,
             resolvedData,
@@ -183,6 +239,62 @@ function handleSpecialModifiers(el, options, effect, specialModifiers) {
     scroll(animation, settings);
     return true;
   }
+
+  if (specialModifiers.includes("hover")) {
+    // Check if options contains 'enter' and 'leave' keys for hover animations
+    const firstOption = options[0];
+    const hasEnterLeave = firstOption && typeof firstOption === 'object' &&
+                          (firstOption.hasOwnProperty('enter') || firstOption.hasOwnProperty('leave'));
+
+    if (hasEnterLeave) {
+      // Use separate animations for hover enter and leave
+      const hoverEnter = firstOption.enter || [];
+      const hoverLeave = firstOption.leave || [];
+
+      hover(el, (target) => {
+        animate(target, ...hoverEnter);
+
+        // Return hover-leave animation function
+        if (hoverLeave.length > 0) {
+          return () => animate(target, ...hoverLeave);
+        }
+      });
+    } else {
+      // Fallback: simple hover animation (no hover-leave)
+      hover(el, (target) => {
+        animate(target, ...options);
+      });
+    }
+    return true;
+  }
+
+  if (specialModifiers.includes("press")) {
+    // Check if options contains 'enter' and 'leave' keys for press animations
+    const firstOption = options[0];
+    const hasEnterLeave = firstOption && typeof firstOption === 'object' &&
+                          (firstOption.hasOwnProperty('enter') || firstOption.hasOwnProperty('leave'));
+
+    if (hasEnterLeave) {
+      // Use separate animations for press enter and leave
+      const pressEnter = firstOption.enter || [];
+      const pressLeave = firstOption.leave || [];
+
+      press(el, (target) => {
+        animate(target, ...pressEnter);
+
+        // Return press-leave animation function
+        if (pressLeave.length > 0) {
+          return () => animate(target, ...pressLeave);
+        }
+      });
+    } else {
+      // Fallback: simple press animation (no press-leave)
+      press(el, (target) => {
+        animate(target, ...options);
+      });
+    }
+    return true;
+  }
 }
 
 /**
@@ -201,7 +313,10 @@ function handleSpecialModifiers(el, options, effect, specialModifiers) {
  * processed later by resolveSpringCalls()
  */
 function parseExpression(expression, evaluateLater) {
-  const isSingleObject = expression.match(/^\{.*\}$/);
+  // Check if it's a single object without string keys (nameless animation)
+  // Named animations have quoted keys like 'animation-name' or "animation-name"
+  const hasNamedKeys = /['"][\w-]+['"]\s*:/.test(expression);
+  const isSingleObject = expression.match(/^\{[\s\S]*\}$/) && !hasNamedKeys;
 
   // Create regex pattern for all registered functions
   const functionPattern = new RegExp(
